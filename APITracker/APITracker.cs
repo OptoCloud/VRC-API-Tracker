@@ -10,14 +10,10 @@ namespace APITracker
 			Patches.Init(HarmonyInstance, LoggerInstance);
 		}
 
-		uint updates = 0;
-		public override void OnLateUpdate()
-		{
-			if (updates++ >= 600)
-			{
-				updates = 0;
-				RateTracker.Log(LoggerInstance);
-			}
-		}
-	}
+        public override void OnApplicationQuit()
+        {
+            RateTracker.Stop();
+        }
+
+    }
 }

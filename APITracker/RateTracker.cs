@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace APITracker
 {
@@ -23,7 +24,7 @@ namespace APITracker
 			[JsonProperty(PropertyName = "max")]
 			uint maxTriggers = uint.MinValue;
 			[JsonIgnore]
-			bool updated = false;
+			bool changed = false;
 
 			public SpecificRateTracker(int mins, int secs)
 			{
@@ -31,29 +32,24 @@ namespace APITracker
 				FrameSize = new TimeSpan(0, mins, secs);
 			}
 
-			public void Trigger(DateTime now)
-			{
-				if (now > FrameStart + FrameSize)
-				{
-					if (Triggers < minTriggers) { minTriggers = Triggers; updated = true; }
-					if (Triggers > maxTriggers) { maxTriggers = Triggers; updated = true; }
+            public bool Update(DateTime now)
+            {
+                if (now > FrameStart + FrameSize)
+                {
+                    if (Triggers < minTriggers) { minTriggers = Triggers; changed = true; }
+                    if (Triggers > maxTriggers) { maxTriggers = Triggers; changed = true; }
 
-					FrameStart = now;
-					Triggers = 0;
-				}
-				else
-				{
-					Triggers++;
-				}
-			}
+                    FrameStart = now;
+                    Triggers = 0;
+                }
+                return changed;
+            }
 
-			public string GetStatus()
-			{
-				if (!updated) return null;
-				updated = false;
-
-				return $"Time({FrameSize}) Min({minTriggers}) Max({maxTriggers})";
-			}
+            public void Trigger(DateTime now)
+            {
+                Update(now);
+                Triggers++;
+            }
 		}
 		class EndPointInfo
 		{
@@ -83,7 +79,6 @@ namespace APITracker
 				};
 			}
 
-
 			public void Trigger(DateTime now)
 			{
 				foreach (SpecificRateTracker tracker in Trackers) {
@@ -91,29 +86,19 @@ namespace APITracker
 				} 
 			}
 
-			public bool Log(MelonLogger.Instance loggerInstance)
+			public bool Update(DateTime now)
 			{
-				uint updates = 0;
-				string msg = $"Endpoint {Url}\n";
+                bool updated = false;
 				foreach (SpecificRateTracker tracker in Trackers)
 				{
-					string status = tracker.GetStatus();
-					if (status != null)
-					{
-						updates++;
-						msg += $"\t\t{status}\n";
-					}
+                    updated |= tracker.Update(now);
 				}
-				if (updates != 0)
-				{
-					loggerInstance.Msg(msg);
-					return true;
-				}
-				return false;
+                return updated;
 			}
 		}
 		static Dictionary<string, EndPointInfo> endpointTimings = new Dictionary<string, EndPointInfo>();
-
+        static bool run;
+        static Thread updateThread;
 		public static void Init()
 		{
 			try
@@ -124,16 +109,36 @@ namespace APITracker
 			{
 				endpointTimings = new Dictionary<string, EndPointInfo>();
 			}
+            run = true;
+            updateThread = new Thread(Update);
+            updateThread.Start();
 		}
 
 		public static void RequestTriggered(String url)
 		{
 			var requestTime = DateTime.Now;
 
-			url = Regex.Replace(url.Split('?')[0], @"(\w*_[0-9A-Fa-f]{8}[-][0-9A-Fa-f]{4}[-][0-9A-Fa-f]{4}[-][0-9A-Fa-f]{4}[-][0-9A-Fa-f]{12})", "[VRCID]");
-			url = Regex.Replace(url, @"(\[VRCID\]:[0-9]*)", "[VRCID]:[INSTANCEID]");
-			url = Regex.Replace(url, @"(~region\([a-z]*\))", "~region([REGION])");
-			url = Regex.Replace(url, @"([A-Z0-9]{48})", "[NONCE]");
+			url = Regex.Replace(
+                    Regex.Replace(
+                        Regex.Replace(
+                            Regex.Replace(
+                                Regex.Replace(
+                                    url.Split('?')[0],
+
+                                    @"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})",
+                                    "[GUID]"),
+
+                                @"(\w+_\[GUID\])",
+                                "[VRCID]"),
+
+                            @"(\[VRCID\]:[^~/]+)",
+                            "[VRCID]:[INSTANCEID]"),
+
+                        @"(~region\([^\)]+\))",
+                        "~region([REGION])"),
+
+                    @"(~nonce\([^\)]+\))",
+                    "~nonce([NONCE])");
 
 			lock (endpointTimings)
 			{
@@ -147,20 +152,32 @@ namespace APITracker
 			}
 		}
 
-		public static void Log(MelonLogger.Instance loggerInstance)
-		{
-			bool updated = false;
-			lock (endpointTimings)
-			{
-				foreach (var endpoint in endpointTimings)
-				{
-					updated |= endpoint.Value.Log(loggerInstance);
-				}
-				if (updated)
-				{
-					File.WriteAllText("endpointlimits.json", JsonConvert.SerializeObject(endpointTimings));
-				}
-			}
+        public static void Stop()
+        {
+            run = false;
+            updateThread.Join();
+        }
+
+		private static void Update()
+        {
+            while (run)
+            {
+                var updateTime = DateTime.Now;
+
+                bool updated = false;
+                lock (endpointTimings)
+                {
+                    foreach (var endpoint in endpointTimings)
+                    {
+                        updated |= endpoint.Value.Update(updateTime);
+                    }
+                    if (updated)
+                    {
+                        File.WriteAllText("endpointlimits.json", JsonConvert.SerializeObject(endpointTimings, Formatting.Indented));
+                    }
+                }
+                Thread.Sleep(10);
+            }
 		}
 	}
 }
